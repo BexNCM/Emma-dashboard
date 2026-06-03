@@ -1,13 +1,43 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Head from 'next/head';
 
 export default function Dashboard() {
+  const [briefing, setBriefing] = useState(null);
   const [expandedItem, setExpandedItem] = useState(null);
   const [draftReply, setDraftReply] = useState(null);
   const [completedItems, setCompletedItems] = useState({});
   const [loading, setLoading] = useState(false);
+  const [dataLoading, setDataLoading] = useState(true);
 
   const MAKE_WEBHOOK_URL = process.env.NEXT_PUBLIC_MAKE_WEBHOOK_URL || '';
+
+  // Fetch fresh email data on page load
+  useEffect(() => {
+    fetchBriefing();
+  }, []);
+
+  const fetchBriefing = async () => {
+    setDataLoading(true);
+    try {
+      // Call the Netlify Function to get fresh email data
+      const response = await fetch('/.netlify/functions/briefing');
+      if (!response.ok) throw new Error('Failed to fetch briefing');
+      
+      const data = await response.json();
+      setBriefing(data.briefing);
+    } catch (error) {
+      console.error('Error fetching briefing:', error);
+      // Fallback to empty briefing on error
+      setBriefing({
+        urgent: [],
+        action: [],
+        fyi: [],
+        meetings: [],
+        ignore: []
+      });
+    }
+    setDataLoading(false);
+  };
 
   const toggleExpand = (id) => {
     setExpandedItem(expandedItem === id ? null : id);
@@ -21,8 +51,9 @@ export default function Dashboard() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           emailId: item.id,
-          subject: item.title,
+          subject: item.subject,
           from: item.from,
+          replyTo: item.replyTo, // Sender's email address
           detail: item.detail,
           action: item.action
         })
@@ -46,89 +77,35 @@ export default function Dashboard() {
     setLoading(false);
   };
 
-  const markComplete = (id) => {
+  const markComplete = async (id, item) => {
     setCompletedItems(prev => ({ ...prev, [id]: true }));
+    
+    // Optional: Call Make scenario to move email to "Done" folder
+    // You would implement this by creating another Make webhook
+    // For now, just mark as done in the dashboard
   };
 
-  const briefData = {
-    urgent: [
-      {
-        id: 'isio',
-        title: 'Re: Introduction & invitation',
-        from: 'Jenny Miller - ISIO',
-        status: 'URGENT — NEEDS YOUR PERSONAL RESPONSE TODAY',
-        detail: "She's reaching out to check in, referencing that the business sale has been pushed back to summer and acknowledging you've got a lot on. Warm, relationship-led touch from a financial/advisory contact who clearly knows the deal timeline.",
-        action: '→ Brief personal reply — keep warm, confirm summer timeline holds',
-        hasReply: true,
-        icon: 'ti-mail'
-      }
-    ],
-    actionRequired: [
-      {
-        id: 'dcc',
-        title: 'Doncaster Chamber Board of Directors',
-        from: 'Daniel Fell MBE - Doncaster Chamber of Commerce',
-        detail: "CEO personally inviting you to consider a NED vacancy ahead of their AGM. A second info-session invite also came from S. Moore. Decide if you want to pursue (profile-building opportunity, local network) and either attend or reply to Dan.",
-        action: '→ Decide and reply to Dan, or attend their info session',
-        hasReply: true,
-        icon: 'ti-briefcase'
-      },
-      {
-        id: 'security',
-        title: 'OpenAI - Security Notice',
-        from: 'OpenAI - Security',
-        detail: "Action Required: Important security update for OpenAI macOS apps. Genuine security notice — update any OpenAI macOS apps on your devices.",
-        action: '→ Deadline 12 June — forward to Amy K or action yourself',
-        hasReply: false,
-        icon: 'ti-lock'
-      },
-      {
-        id: 'jane',
-        title: 'Warnington Drive — Joinery Update',
-        from: 'Jane Price-Stephens - Interior Designer',
-        detail: "Updated presentation via WeTransfer including proposed downstairs WC design. File available to review.",
-        action: '→ Download and review presentation; coordinate with David Roe',
-        hasReply: false,
-        isFile: true,
-        icon: 'ti-download'
-      }
-    ],
-    fyi: [
-      {
-        id: 'edi',
-        title: 'Edi Adegbola (Propaganda) — Yorkshire Post interview confirmed',
-        detail: '2pm 19 June (Teams). Already in calendar.',
-        icon: 'ti-calendar'
-      },
-      {
-        id: 'dhl',
-        title: 'DHL ×2 — Aritzia delivery est. Friday 5 June',
-        detail: 'No-signature authorisation requested. Tracking in hand.',
-        icon: 'ti-truck'
-      },
-      {
-        id: 'net',
-        title: 'NET-A-PORTER — Order on its way',
-        detail: 'Tracking JD014600012679249833.',
-        icon: 'ti-truck'
-      }
-    ],
-    canIgnore: [
-      'DHgate promo · Blys Father\'s Day · MyoMaster product email · HealthExpress prescription reminder · LinkedIn newsletters ×3 · FitMind book launch · Stocked Food menu update · Lake Y / Resamania members update · Plaud Team product email'
-    ],
-    meetings: [
-      {
-        id: 'oxify1',
-        time: '2:45pm – 4:15pm BST',
-        title: 'Oxify — 90 Minute S Chamber Session',
-        location: 'Ground floor, The Randall Business Centre, Retford, DN22 7WF',
-        detail: 'Personal health appointment — hyperbaric oxygen chamber session. Arrive no earlier than 5 minutes before. No prep needed.',
-        icon: 'ti-heart-pulse'
-      }
-    ]
-  };
+  if (dataLoading) {
+    return (
+      <div style={{
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        minHeight: '100vh',
+        fontFamily: '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif',
+        backgroundColor: '#f5f3f0'
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <p style={{ fontSize: '16px', marginBottom: '8px' }}>Loading your briefing...</p>
+          <p style={{ fontSize: '12px', color: '#888' }}>Fetching emails and categorizing with AI</p>
+        </div>
+      </div>
+    );
+  }
 
-  const isItemComplete = (id) => completedItems[id];
+  if (!briefing) {
+    return <div>Error loading briefing</div>;
+  }
 
   return (
     <>
@@ -143,6 +120,7 @@ export default function Dashboard() {
           .header { padding-bottom: 1rem; border-bottom: 1px solid #e5e3e0; margin-bottom: 1.5rem; }
           .header h1 { font-size: 22px; font-weight: 500; margin-bottom: 0.25rem; }
           .header p { font-size: 13px; color: #888; }
+          .refresh-btn { font-size: 12px; color: #378add; cursor: pointer; margin-left: 12px; text-decoration: underline; }
           .section { margin-bottom: 2rem; }
           .section-title { display: flex; align-items: center; gap: 8px; margin-bottom: 1rem; font-size: 16px; font-weight: 500; }
           .section-title i { font-size: 20px; }
@@ -177,134 +155,129 @@ export default function Dashboard() {
           textarea { width: 100%; min-height: 120px; font-size: 13px; font-family: monospace; padding: 8px; border: 1px solid #e5e3e0; border-radius: 6px; margin-bottom: 12px; }
           .canignore { background: #f9f7f4; border: 1px dashed #d1cfcc; border-radius: 8px; padding: 1rem; font-size: 13px; color: #888; line-height: 1.6; }
           .complete { opacity: 0.6; text-decoration: line-through; }
+          .empty { font-size: 12px; color: #999; font-style: italic; }
         `}</style>
       </Head>
 
       <div className="container">
         <div className="header">
-          <h1>☀️ Em's Daily Briefing</h1>
-          <p>Wednesday, 3 June 2026</p>
+          <h1>☀️ Em's Daily Briefing <span className="refresh-btn" onClick={fetchBriefing}>↻ refresh</span></h1>
+          <p>Updated {new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
         </div>
 
         {/* URGENT */}
-        <div className="section">
-          <div className="section-title" style={{ color: '#c5192d' }}>
-            <span>🔴</span> Urgent — needs your personal response today
-          </div>
-          {briefData.urgent.map(item => (
-            <div key={item.id} className={`item urgent ${isItemComplete(item.id) ? 'complete' : ''}`} onClick={() => toggleExpand(item.id)}>
-              <div className="item-header">
-                <i className={`ti ${item.icon}`}></i>
-                <div className="item-content">
-                  <p className="item-title">{item.title}</p>
-                  <p className="item-meta">{item.from}</p>
-                  <p className="item-status">{item.status}</p>
-                </div>
-              </div>
-              {expandedItem === item.id && (
-                <div className="item-detail">
-                  <p>{item.detail}</p>
-                  <p className="item-action">{item.action}</p>
-                  <div className="button-group">
-                    {item.hasReply && (
-                      <button className="btn-primary" onClick={(e) => { e.stopPropagation(); generateReply(item); }} disabled={loading}>
-                        {loading ? 'Generating...' : 'Draft reply →'}
-                      </button>
-                    )}
-                    <button className="btn-secondary" onClick={(e) => { e.stopPropagation(); markComplete(item.id); }}>
-                      Done ✓
-                    </button>
+        {briefing.urgent && briefing.urgent.length > 0 && (
+          <div className="section">
+            <div className="section-title" style={{ color: '#c5192d' }}>
+              <span>🔴</span> Urgent — needs your personal response today
+            </div>
+            {briefing.urgent.map(item => (
+              <div key={item.id} className={`item urgent ${completedItems[item.id] ? 'complete' : ''}`} onClick={() => toggleExpand(item.id)}>
+                <div className="item-header">
+                  <i className="ti ti-mail"></i>
+                  <div className="item-content">
+                    <p className="item-title">{item.subject}</p>
+                    <p className="item-meta">{item.from}</p>
                   </div>
                 </div>
-              )}
-            </div>
-          ))}
-        </div>
+                {expandedItem === item.id && (
+                  <div className="item-detail">
+                    <p>{item.detail}</p>
+                    <p className="item-action">→ {item.action}</p>
+                    <div className="button-group">
+                      {item.hasReply && (
+                        <button className="btn-primary" onClick={(e) => { e.stopPropagation(); generateReply(item); }} disabled={loading}>
+                          {loading ? 'Generating...' : 'Draft reply →'}
+                        </button>
+                      )}
+                      <button className="btn-secondary" onClick={(e) => { e.stopPropagation(); markComplete(item.id, item); }}>
+                        Done ✓
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* ACTION REQUIRED */}
-        <div className="section">
-          <div className="section-title" style={{ color: '#b35806' }}>
-            <span>🟠</span> Action required — not urgent
-          </div>
-          {briefData.actionRequired.map(item => (
-            <div key={item.id} className={`item action ${isItemComplete(item.id) ? 'complete' : ''}`} onClick={() => toggleExpand(item.id)}>
-              <div className="item-header">
-                <i className={`ti ${item.icon}`}></i>
-                <div className="item-content">
-                  <p className="item-title">{item.title}</p>
-                  <p className="item-meta">{item.from}</p>
-                </div>
-              </div>
-              {expandedItem === item.id && (
-                <div className="item-detail">
-                  <p>{item.detail}</p>
-                  <p className="item-action">{item.action}</p>
-                  <div className="button-group">
-                    {item.hasReply && (
-                      <button className="btn-primary" onClick={(e) => { e.stopPropagation(); generateReply(item); }} disabled={loading}>
-                        {loading ? 'Generating...' : 'Draft reply →'}
-                      </button>
-                    )}
-                    {item.isFile && (
-                      <button className="btn-primary" onClick={(e) => { e.stopPropagation(); }}>
-                        Download →
-                      </button>
-                    )}
-                    <button className="btn-secondary" onClick={(e) => { e.stopPropagation(); markComplete(item.id); }}>
-                      Done ✓
-                    </button>
+        {briefing.action && briefing.action.length > 0 && (
+          <div className="section">
+            <div className="section-title" style={{ color: '#b35806' }}>
+              <span>🟠</span> Action required — not urgent
+            </div>
+            {briefing.action.map(item => (
+              <div key={item.id} className={`item action ${completedItems[item.id] ? 'complete' : ''}`} onClick={() => toggleExpand(item.id)}>
+                <div className="item-header">
+                  <i className="ti ti-briefcase"></i>
+                  <div className="item-content">
+                    <p className="item-title">{item.subject}</p>
+                    <p className="item-meta">{item.from}</p>
                   </div>
                 </div>
-              )}
-            </div>
-          ))}
-        </div>
+                {expandedItem === item.id && (
+                  <div className="item-detail">
+                    <p>{item.detail}</p>
+                    <p className="item-action">→ {item.action}</p>
+                    <div className="button-group">
+                      {item.hasReply && (
+                        <button className="btn-primary" onClick={(e) => { e.stopPropagation(); generateReply(item); }} disabled={loading}>
+                          {loading ? 'Generating...' : 'Draft reply →'}
+                        </button>
+                      )}
+                      <button className="btn-secondary" onClick={(e) => { e.stopPropagation(); markComplete(item.id, item); }}>
+                        Done ✓
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* FYI */}
-        <div className="section">
-          <div className="section-title" style={{ color: '#0f6e56' }}>
-            <span>🟢</span> FYI / low priority
-          </div>
-          {briefData.fyi.map(item => (
-            <div key={item.id} className="item fyi">
-              <div className="item-header">
-                <i className={`ti ${item.icon}`}></i>
-                <div className="item-content">
-                  <p className="item-title">{item.title}</p>
-                  {item.detail && <p className="item-meta">{item.detail}</p>}
+        {briefing.fyi && briefing.fyi.length > 0 && (
+          <div className="section">
+            <div className="section-title" style={{ color: '#0f6e56' }}>
+              <span>🟢</span> FYI / low priority
+            </div>
+            {briefing.fyi.map(item => (
+              <div key={item.id} className="item fyi">
+                <div className="item-header">
+                  <i className="ti ti-info-circle"></i>
+                  <div className="item-content">
+                    <p className="item-title">{item.subject}</p>
+                    <p className="item-meta">{item.from}</p>
+                    {item.detail && <p style={{ fontSize: '13px', marginTop: '6px' }}>{item.detail}</p>}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
-
-        {/* CAN IGNORE */}
-        <div className="section">
-          <div className="section-title">
-            <span>⚪</span> Can likely be ignored
+            ))}
           </div>
-          <div className="canignore">{briefData.canIgnore[0]}</div>
-        </div>
+        )}
 
         {/* MEETINGS */}
-        <div className="section">
-          <div className="section-title">
-            <span>📅</span> Today's meetings
-          </div>
-          {briefData.meetings.map(meeting => (
-            <div key={meeting.id} className="item fyi">
-              <div className="item-header">
-                <i className={`ti ${meeting.icon}`}></i>
-                <div className="item-content">
-                  <p className="item-title">{meeting.title}</p>
-                  <p className="item-meta" style={{ fontWeight: '500' }}>{meeting.time}</p>
-                  <p className="item-meta">{meeting.location}</p>
-                  <p style={{ fontSize: '13px', margin: '6px 0 0', lineHeight: '1.5' }}>{meeting.detail}</p>
+        {briefing.meetings && briefing.meetings.length > 0 && (
+          <div className="section">
+            <div className="section-title">
+              <span>📅</span> Today's meetings & appointments
+            </div>
+            {briefing.meetings.map(item => (
+              <div key={item.id} className="item fyi">
+                <div className="item-header">
+                  <i className="ti ti-calendar"></i>
+                  <div className="item-content">
+                    <p className="item-title">{item.subject}</p>
+                    <p className="item-meta">{item.from}</p>
+                    {item.detail && <p style={{ fontSize: '13px', marginTop: '6px' }}>{item.detail}</p>}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
 
         {/* DRAFT PANEL */}
         {draftReply && (
