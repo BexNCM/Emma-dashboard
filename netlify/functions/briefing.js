@@ -1,4 +1,5 @@
 const https = require('https');
+const { URL } = require('url');
 
 exports.handler = async (event, context) => {
   try {
@@ -66,33 +67,40 @@ function getAccessToken(tenantId, clientId, clientSecret) {
   });
 }
 
-function makeGraphRequest(url, token) {
+function makeGraphRequest(fullUrl, token) {
   return new Promise((resolve, reject) => {
-    const options = {
-      hostname: 'graph.microsoft.com',
-      path: url.replace('https://graph.microsoft.com', ''),
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-    };
+    try {
+      // Parse the URL properly
+      const url = new URL(fullUrl);
+      
+      const options = {
+        hostname: url.hostname,
+        path: url.pathname + url.search, // This handles encoding automatically
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      };
 
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', chunk => { data += chunk; });
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data);
-          resolve(parsed);
-        } catch (e) {
-          reject(new Error('Failed to parse Graph response: ' + e.message));
-        }
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', chunk => { data += chunk; });
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            resolve(parsed);
+          } catch (e) {
+            reject(new Error('Failed to parse Graph response: ' + e.message));
+          }
+        });
       });
-    });
 
-    req.on('error', reject);
-    req.end();
+      req.on('error', reject);
+      req.end();
+    } catch (e) {
+      reject(new Error('Failed to build request: ' + e.message));
+    }
   });
 }
 
@@ -124,8 +132,8 @@ async function fetchOutlookEmails() {
       isRead: email.isRead,
     }));
   } catch (error) {
-    console.error('Error fetching emails:', error);
-    return [];
+    console.error('Error fetching emails:', error.message);
+    throw error;
   }
 }
 
@@ -231,7 +239,7 @@ ${emailList}`;
         categorized = JSON.parse(jsonMatch[0]).categorized || [];
       }
     } catch (e) {
-      console.error('Failed to parse categorization:', e);
+      console.error('Failed to parse categorization:', e.message);
       categorized = [];
     }
 
@@ -280,13 +288,7 @@ ${emailList}`;
 
     return { urgent, action, fyi, meetings: [], ignore: [] };
   } catch (error) {
-    console.error('Error categorizing emails:', error);
-    return {
-      urgent: [],
-      action: [],
-      fyi: [],
-      meetings: [],
-      ignore: [],
-    };
+    console.error('Error categorizing emails:', error.message);
+    throw error;
   }
 }
