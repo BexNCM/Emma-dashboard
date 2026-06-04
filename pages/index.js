@@ -4,10 +4,13 @@ import Head from 'next/head';
 export default function Dashboard() {
   const [briefing, setBriefing] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [selectedAction, setSelectedAction] = useState(null);
+  const [processingEmail, setProcessingEmail] = useState(null);
+
+  const MAKE_WEBHOOK_URL = process.env.NEXT_PUBLIC_MAKE_WEBHOOK_URL || '';
 
   useEffect(() => {
     fetchBriefing();
-    // Auto-refresh every 5 minutes
     const interval = setInterval(fetchBriefing, 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, []);
@@ -22,6 +25,38 @@ export default function Dashboard() {
       console.error('Error fetching briefing:', error);
     }
     setLoading(false);
+  };
+
+  const handleAction = async (action, item) => {
+    setProcessingEmail(item.id);
+    try {
+      const response = await fetch(MAKE_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          emailId: item.id,
+          subject: item.subject,
+          from: item.from,
+          replyTo: item.replyTo,
+          detail: item.detail,
+          action: action,
+          actionType: action, // Type of action: reply, delete, forward, addToCalendar, markDone
+        })
+      });
+
+      if (!response.ok) throw new Error('Failed to perform action');
+      
+      // Show success message
+      alert(`✓ ${action} completed for "${item.subject}"`);
+      
+      // Refresh briefing
+      fetchBriefing();
+    } catch (error) {
+      console.error('Error:', error);
+      alert(`Error performing ${action}: ${error.message}`);
+    } finally {
+      setProcessingEmail(null);
+    }
   };
 
   const formatDate = () => {
@@ -75,7 +110,105 @@ export default function Dashboard() {
     </div>
   );
 
-  const EmailCard = ({ sender, subject, summary, action, backgroundColor, borderColor, textColor }) => (
+  const ActionButtons = ({ item, backgroundColor }) => (
+    <div style={{
+      display: 'flex',
+      gap: '8px',
+      marginTop: '12px',
+      flexWrap: 'wrap',
+    }}>
+      <button
+        onClick={() => handleAction('reply', item)}
+        disabled={processingEmail === item.id}
+        style={{
+          background: '#2563eb',
+          color: 'white',
+          border: 'none',
+          padding: '6px 12px',
+          borderRadius: '6px',
+          fontSize: '12px',
+          fontWeight: '600',
+          cursor: processingEmail === item.id ? 'not-allowed' : 'pointer',
+          opacity: processingEmail === item.id ? 0.6 : 1,
+          transition: 'all 0.2s',
+        }}
+        onMouseOver={(e) => !processingEmail && (e.target.style.background = '#1d4ed8')}
+        onMouseOut={(e) => (e.target.style.background = '#2563eb')}
+      >
+        ↩️ Reply
+      </button>
+      <button
+        onClick={() => handleAction('forward', item)}
+        disabled={processingEmail === item.id}
+        style={{
+          background: '#7c3aed',
+          color: 'white',
+          border: 'none',
+          padding: '6px 12px',
+          borderRadius: '6px',
+          fontSize: '12px',
+          fontWeight: '600',
+          cursor: processingEmail === item.id ? 'not-allowed' : 'pointer',
+          opacity: processingEmail === item.id ? 0.6 : 1,
+        }}
+      >
+        ➡️ Forward
+      </button>
+      <button
+        onClick={() => handleAction('addToCalendar', item)}
+        disabled={processingEmail === item.id}
+        style={{
+          background: '#0891b2',
+          color: 'white',
+          border: 'none',
+          padding: '6px 12px',
+          borderRadius: '6px',
+          fontSize: '12px',
+          fontWeight: '600',
+          cursor: processingEmail === item.id ? 'not-allowed' : 'pointer',
+          opacity: processingEmail === item.id ? 0.6 : 1,
+        }}
+      >
+        📅 Add to Calendar
+      </button>
+      <button
+        onClick={() => handleAction('delete', item)}
+        disabled={processingEmail === item.id}
+        style={{
+          background: '#dc2626',
+          color: 'white',
+          border: 'none',
+          padding: '6px 12px',
+          borderRadius: '6px',
+          fontSize: '12px',
+          fontWeight: '600',
+          cursor: processingEmail === item.id ? 'not-allowed' : 'pointer',
+          opacity: processingEmail === item.id ? 0.6 : 1,
+        }}
+      >
+        🗑️ Delete
+      </button>
+      <button
+        onClick={() => handleAction('markDone', item)}
+        disabled={processingEmail === item.id}
+        style={{
+          background: '#059669',
+          color: 'white',
+          border: 'none',
+          padding: '6px 12px',
+          borderRadius: '6px',
+          fontSize: '12px',
+          fontWeight: '600',
+          cursor: processingEmail === item.id ? 'not-allowed' : 'pointer',
+          opacity: processingEmail === item.id ? 0.6 : 1,
+        }}
+      >
+        ✓ Done
+      </button>
+    </div>
+  );
+
+  const EmailCard = ({ item, backgroundColor, borderColor, textColor }) => (
     <div style={{
       background: backgroundColor,
       border: `1px solid ${borderColor}`,
@@ -84,7 +217,7 @@ export default function Dashboard() {
       marginBottom: '12px',
     }}>
       <div style={{ fontSize: '13px', color: '#6b7280', marginBottom: '6px' }}>
-        {sender}
+        {item.from}
       </div>
       <div style={{
         fontSize: '15px',
@@ -92,7 +225,7 @@ export default function Dashboard() {
         color: '#1a1a1a',
         marginBottom: '10px',
       }}>
-        "{subject}"
+        "{item.subject}"
       </div>
       <p style={{
         margin: '0 0 12px',
@@ -100,21 +233,9 @@ export default function Dashboard() {
         color: '#374151',
         lineHeight: '1.6',
       }}>
-        {summary}
+        {item.detail}
       </p>
-      {action && (
-        <div style={{
-          background: textColor,
-          color: 'white',
-          display: 'inline-block',
-          padding: '6px 14px',
-          borderRadius: '6px',
-          fontSize: '12px',
-          fontWeight: '600',
-        }}>
-          → {action}
-        </div>
-      )}
+      <ActionButtons item={item} backgroundColor={backgroundColor} />
     </div>
   );
 
@@ -189,7 +310,7 @@ export default function Dashboard() {
               color: '#0c4a6e',
             }}>
               You have <strong>{briefing.urgent.length}</strong> urgent {briefing.urgent.length === 1 ? 'email' : 'emails'} requiring your personal response today.
-              {briefing.action && briefing.action.length > 0 && ` Plus ${briefing.action.length} action ${briefing.action.length === 1 ? 'item' : 'items'} that can wait.`}
+              {briefing.action && briefing.action.length > 0 && ` Plus ${briefing.action.length} action ${briefing.action.length === 1 ? 'item' : 'items'}.`}
             </p>
           </div>
         )}
@@ -201,10 +322,7 @@ export default function Dashboard() {
               {briefing.urgent.map(item => (
                 <EmailCard
                   key={item.id}
-                  sender={item.from}
-                  subject={item.subject}
-                  summary={item.detail}
-                  action={item.action}
+                  item={item}
                   backgroundColor="#fff5f5"
                   borderColor="#fecaca"
                   textColor="#dc2626"
@@ -219,10 +337,7 @@ export default function Dashboard() {
               {briefing.action.map(item => (
                 <EmailCard
                   key={item.id}
-                  sender={item.from}
-                  subject={item.subject}
-                  summary={item.detail}
-                  action={item.action}
+                  item={item}
                   backgroundColor="#fffbeb"
                   borderColor="#fde68a"
                   textColor="#d97706"
@@ -344,7 +459,7 @@ export default function Dashboard() {
             fontSize: '12px',
             color: '#94a3b8',
           }}>
-            Generated by your AI daily briefing · NCM Asset Management · Updated {new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+            Interactive briefing · NCM Asset Management · Updated {new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
           </div>
         </div>
       </div>
