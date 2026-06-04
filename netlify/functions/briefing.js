@@ -1,215 +1,250 @@
-// netlify/functions/briefing.js
-// Deploy this to: netlify/functions/briefing.js in your GitHub repo
-// This function fetches Emma's Outlook emails and uses Claude to categorize them
+const https = require('https');
 
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+exports.handler = async (event, context) => {
+  try {
+    // Get emails from Outlook
+    const emails = await fetchOutlookEmails();
 
-// Microsoft Graph API endpoints
-const GRAPH_API = 'https://graph.microsoft.com/v1.0';
-const EMMA_EMAIL = 'emma@ncmassetmanagement.co.uk';
-const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
-const TOKEN_ENDPOINT = 'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token';
+    // Categorize with Claude
+    const briefing = await categorizEmailsWithClaude(emails);
 
-// Get access token using client credentials flow
-async function getMicrosoftToken() {
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        success: true,
+        briefing,
+        totalEmails: emails.length,
+        generatedAt: new Date().toISOString(),
+      }),
+    };
+  } catch (error) {
+    console.error('Error:', error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ success: false, error: error.message }),
+    };
+  }
+};
+
+async function fetchOutlookEmails() {
   const tenantId = process.env.MICROSOFT_TENANT_ID;
   const clientId = process.env.MICROSOFT_CLIENT_ID;
   const clientSecret = process.env.MICROSOFT_CLIENT_SECRET;
 
-  if (!tenantId || !clientId || !clientSecret) {
-    throw new Error('Missing Microsoft credentials in environment variables');
-  }
+  // Get access token
+  const token = await getAccessToken(tenantId, clientId, clientSecret);
 
-  const tokenUrl = TOKEN_ENDPOINT.replace('{tenant}', tenantId);
+  // Fetch emails
+  const response = await makeRequest('https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=20&$orderby=receivedDateTime desc', token);
   
-  const response = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
+  const emails = response.value || [];
+  
+  return emails.map(email => ({
+    id: email.id,
+    subject: email.subject || '(No subject)',
+    from: email.from?.emailAddress?.name || email.from?.emailAddress?.address || 'Unknown',
+    replyTo: email.replyTo?.[0]?.emailAddress?.address || email.from?.emailAddress?.address,
+    detail: (email.bodyPreview || '').substring(0, 300),
+    receivedDateTime: email.receivedDateTime,
+    isRead: email.isRead,
+  }));
+}
+
+async function getAccessToken(tenantId, clientId, clientSecret) {
+  return new Promise((resolve, reject) => {
+    const postData = new URLSearchParams({
       client_id: clientId,
       client_secret: clientSecret,
+      grant_type: 'client_credentials',
       scope: 'https://graph.microsoft.com/.default',
-      grant_type: 'client_credentials'
-    })
-  });
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Token request failed: ${response.status} ${error}`);
-  }
-
-  const data = await response.json();
-  return data.access_token;
-}
-
-exports.handler = async (event, context) => {
-  try {
-    // Step 1: Get access token using client credentials
-    const accessToken = await getMicrosoftToken();
-    const claudeToken = process.env.ANTHROPIC_API_KEY;
-
-    if (!claudeToken) {
-      return {
-        statusCode: 500,
-        body: JSON.stringify({ error: 'Missing ANTHROPIC_API_KEY in environment variables' })
-      };
-    }
-
-    // Step 2: Fetch Emma's inbox emails
-    const emailsResponse = await fetch(
-      `${GRAPH_API}/users/${EMMA_EMAIL}/mailFolders/inbox/messages?$top=20&$select=subject,from,receivedDateTime,bodyPreview,isRead,importance`,
-      {
-        headers: { 'Authorization': `Bearer ${accessToken}` }
-      }
-    );
-
-    if (!emailsResponse.ok) {
-      throw new Error(`Graph API error: ${emailsResponse.status}`);
-    }
-
-    const emailsData = await emailsResponse.json();
-    const emails = emailsData.value || [];
-
-    // Step 3: For each email, use Claude to categorize
-    const categorizedEmails = await Promise.all(
-      emails.map(async (email) => {
-        try {
-          // Extract sender email
-          const senderEmail = email.from?.emailAddress?.address || 'unknown@example.com';
-          const senderName = email.from?.emailAddress?.name || 'Unknown';
-
-          // Call Claude to categorize
-          const claudeResponse = await fetch(ANTHROPIC_API, {
-            method: 'POST',
-            headers: {
-              'x-api-key': claudeToken,
-              'anthropic-version': '2023-06-01',
-              'content-type': 'application/json'
-            },
-            body: JSON.stringify({
-              model: 'claude-opus-4-6',
-              max_tokens: 300,
-              messages: [
-                {
-                  role: 'user',
-                  content: `Categorize this email for Emma McSkelly (CEO of NCM Asset Management).
-
-Subject: ${email.subject}
-From: ${senderName}
-Preview: ${email.bodyPreview}
-Importance flag: ${email.importance}
-
-Return ONLY valid JSON (no markdown, no preamble):
-{
-  "category": "urgent|action|fyi|meeting|ignore",
-  "detail": "1-2 sentence summary of what Emma needs to know",
-  "action": "What Emma should do (if any)",
-  "hasReply": true|false
-}
-
-Categories:
-- urgent: Needs Emma's immediate personal response today (business contacts, decisions, confirmations)
-- action: Important but not urgent (events, deadlines, information to review)
-- fyi: Informational only (updates, confirmations, tracking)
-- meeting: Calendar/appointment info
-- ignore: Marketing, spam, newsletters, auto-replies`
-                }
-              ]
-            })
-          });
-
-          if (!claudeResponse.ok) {
-            console.error('Claude API error:', await claudeResponse.text());
-            // Default to FYI if Claude fails
-            return {
-              id: email.id,
-              subject: email.subject,
-              from: senderName,
-              replyTo: senderEmail,
-              category: 'fyi',
-              detail: email.bodyPreview,
-              action: 'Review',
-              hasReply: false,
-              receivedDateTime: email.receivedDateTime,
-              isRead: email.isRead
-            };
-          }
-
-          const claudeData = await claudeResponse.json();
-          const content = claudeData.content[0]?.text || '{}';
-          
-          // Parse Claude's JSON response
-          let parsed;
-          try {
-            parsed = JSON.parse(content);
-          } catch (e) {
-            console.error('Failed to parse Claude response:', content);
-            parsed = { category: 'fyi', detail: email.bodyPreview, action: 'Review', hasReply: false };
-          }
-
-          return {
-            id: email.id,
-            subject: email.subject,
-            from: senderName,
-            replyTo: senderEmail,
-            category: parsed.category || 'fyi',
-            detail: parsed.detail || email.bodyPreview,
-            action: parsed.action || 'Review',
-            hasReply: parsed.hasReply || false,
-            receivedDateTime: email.receivedDateTime,
-            isRead: email.isRead
-          };
-        } catch (error) {
-          console.error('Error categorizing email:', error);
-          return {
-            id: email.id,
-            subject: email.subject,
-            from: email.from?.emailAddress?.name || 'Unknown',
-            replyTo: email.from?.emailAddress?.address || 'unknown@example.com',
-            category: 'fyi',
-            detail: email.bodyPreview,
-            action: 'Review',
-            hasReply: false,
-            receivedDateTime: email.receivedDateTime,
-            isRead: email.isRead,
-            error: true
-          };
-        }
-      })
-    );
-
-    // Step 4: Group emails by category
-    const briefing = {
-      urgent: [],
-      action: [],
-      fyi: [],
-      meetings: [],
-      ignore: []
-    };
-
-    categorizedEmails.forEach(email => {
-      if (email.category === 'meeting') {
-        briefing.meetings.push(email);
-      } else if (briefing[email.category]) {
-        briefing[email.category].push(email);
-      }
     });
 
-    return {
-      statusCode: 200,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        success: true,
-        generatedAt: new Date().toISOString(),
-        briefing: briefing,
-        totalEmails: categorizedEmails.length
-      })
+    const options = {
+      hostname: 'login.microsoftonline.com',
+      path: `/${tenantId}/oauth2/v2.0/token`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': postData.toString().length,
+      },
     };
-  } catch (error) {
-    console.error('Function error:', error);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: error.message })
-    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve(parsed.access_token);
+        } catch (e) {
+          reject(new Error('Failed to parse token response'));
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.write(postData.toString());
+    req.end();
+  });
+}
+
+function makeRequest(url, token) {
+  return new Promise((resolve, reject) => {
+    const options = new URL(url);
+    const req = https.request(options, { headers: { Authorization: `Bearer ${token}` } }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function categorizEmailsWithClaude(emails) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+
+  // Build email list for Claude
+  const emailList = emails.map((e, i) => 
+    `Email ${i + 1}:\nFrom: ${e.from}\nSubject: ${e.subject}\nPreview: ${e.detail}`
+  ).join('\n\n');
+
+  const prompt = `You are Emma McSkelly's executive assistant. Categorize these emails into three categories:
+
+🔴 URGENT (needs Emma's personal response today):
+- Financial alerts or account issues
+- Decisions needed from partners/clients
+- Time-sensitive items with deadlines today
+- Complaints or escalations
+- Business-critical updates
+
+🟡 ACTION (not urgent, but needs a response):
+- Information needed from Emma (specs, decisions, confirmations)
+- Follow-ups on ongoing projects
+- Internal requests for input/approval
+- Scheduled meetings/calls that need confirmation
+
+🟢 FYI (low priority, informational only):
+- Newsletters, notifications, transactional emails
+- CC'd conversations Emma's not directly involved in
+- Status updates (no action needed)
+- Congratulations, board opportunities, general interest items
+
+RULES:
+1. Be strict about URGENT - only things that truly need Emma TODAY
+2. Be strict about ACTION - things that definitely need a response
+3. Everything else goes in FYI
+4. Financial/account issues = URGENT
+5. Project specs/confirmations = ACTION
+6. Newsletters/marketing = FYI
+
+Return ONLY a JSON object with this structure (NO OTHER TEXT):
+{
+  "categorized": [
+    {
+      "index": 1,
+      "category": "urgent|action|fyi",
+      "reason": "brief reason"
+    },
+    ...
+  ]
+}
+
+EMAILS TO CATEGORIZE:
+${emailList}`;
+
+  const response = await callClaudeAPI(apiKey, prompt);
+  
+  // Parse Claude's response
+  let categorized = [];
+  try {
+    categorized = JSON.parse(response).categorized || [];
+  } catch (e) {
+    console.error('Failed to parse Claude response:', response);
+    categorized = [];
   }
-};
+
+  // Build briefing structure
+  const urgent = [];
+  const action = [];
+  const fyi = [];
+
+  categorized.forEach(cat => {
+    const email = emails[cat.index - 1];
+    if (!email) return;
+
+    const emailObj = {
+      id: email.id,
+      subject: email.subject,
+      from: email.from,
+      replyTo: email.replyTo,
+      category: cat.category,
+      detail: email.detail,
+      action: cat.category === 'urgent' ? 'Respond today' : cat.category === 'action' ? 'Action needed' : 'Review',
+      receivedDateTime: email.receivedDateTime,
+      isRead: email.isRead,
+    };
+
+    if (cat.category === 'urgent') {
+      urgent.push(emailObj);
+    } else if (cat.category === 'action') {
+      action.push(emailObj);
+    } else {
+      fyi.push(emailObj);
+    }
+  });
+
+  return {
+    urgent,
+    action,
+    fyi,
+    meetings: [],
+    ignore: [],
+  };
+}
+
+function callClaudeAPI(apiKey, prompt) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      model: 'claude-opus-4-6',
+      max_tokens: 1500,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const options = {
+      hostname: 'api.anthropic.com',
+      path: '/v1/messages',
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          const content = parsed.content?.[0]?.text || '';
+          resolve(content);
+        } catch (e) {
+          reject(new Error('Failed to parse Claude response'));
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
