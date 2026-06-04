@@ -2,14 +2,12 @@ const https = require('https');
 
 exports.handler = async (event, context) => {
   try {
-    // Get emails from Outlook
     const emails = await fetchOutlookEmails();
-
-    // Categorize with Claude
-    const briefing = await categorizEmailsWithClaude(emails);
+    const briefing = await categorizEmails(emails);
 
     return {
       statusCode: 200,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         success: true,
         briefing,
@@ -18,46 +16,22 @@ exports.handler = async (event, context) => {
       }),
     };
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error in briefing function:', error);
     return {
       statusCode: 500,
-      body: JSON.stringify({ success: false, error: error.message }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        success: false,
+        error: error.message,
+        briefing: { urgent: [], action: [], fyi: [], meetings: [], ignore: [] },
+      }),
     };
   }
 };
 
-async function fetchOutlookEmails() {
-  const tenantId = process.env.MICROSOFT_TENANT_ID;
-  const clientId = process.env.MICROSOFT_CLIENT_ID;
-  const clientSecret = process.env.MICROSOFT_CLIENT_SECRET;
-
-  // Get access token
-  const token = await getAccessToken(tenantId, clientId, clientSecret);
-
-  // Fetch emails
-  const response = await makeRequest('https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=20&$orderby=receivedDateTime desc', token);
-  
-  const emails = response.value || [];
-  
-  return emails.map(email => ({
-    id: email.id,
-    subject: email.subject || '(No subject)',
-    from: email.from?.emailAddress?.name || email.from?.emailAddress?.address || 'Unknown',
-    replyTo: email.replyTo?.[0]?.emailAddress?.address || email.from?.emailAddress?.address,
-    detail: (email.bodyPreview || '').substring(0, 300),
-    receivedDateTime: email.receivedDateTime,
-    isRead: email.isRead,
-  }));
-}
-
-async function getAccessToken(tenantId, clientId, clientSecret) {
+function getAccessToken(tenantId, clientId, clientSecret) {
   return new Promise((resolve, reject) => {
-    const postData = new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: 'client_credentials',
-      scope: 'https://graph.microsoft.com/.default',
-    });
+    const postData = `client_id=${clientId}&client_secret=${encodeURIComponent(clientSecret)}&grant_type=client_credentials&scope=https://graph.microsoft.com/.default`;
 
     const options = {
       hostname: 'login.microsoftonline.com',
@@ -65,148 +39,94 @@ async function getAccessToken(tenantId, clientId, clientSecret) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'Content-Length': postData.toString().length,
+        'Content-Length': postData.length,
       },
     };
 
     const req = https.request(options, (res) => {
       let data = '';
-      res.on('data', chunk => data += chunk);
+      res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
         try {
           const parsed = JSON.parse(data);
-          resolve(parsed.access_token);
+          if (parsed.access_token) {
+            resolve(parsed.access_token);
+          } else {
+            reject(new Error('No access token in response'));
+          }
         } catch (e) {
-          reject(new Error('Failed to parse token response'));
+          reject(new Error('Failed to parse token response: ' + e.message));
         }
       });
     });
 
     req.on('error', reject);
-    req.write(postData.toString());
+    req.write(postData);
     req.end();
   });
 }
 
-function makeRequest(url, token) {
+function makeGraphRequest(url, token) {
   return new Promise((resolve, reject) => {
-    const options = new URL(url);
-    const req = https.request(options, { headers: { Authorization: `Bearer ${token}` } }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch (e) {
-          reject(e);
-        }
-      });
-    });
-    req.on('error', reject);
-    req.end();
-  });
-}
-
-async function categorizEmailsWithClaude(emails) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-
-  // Build email list for Claude
-  const emailList = emails.map((e, i) => 
-    `Email ${i + 1}:\nFrom: ${e.from}\nSubject: ${e.subject}\nPreview: ${e.detail}`
-  ).join('\n\n');
-
-  const prompt = `You are Emma McSkelly's executive assistant. Categorize these emails into three categories:
-
-🔴 URGENT (needs Emma's personal response today):
-- Financial alerts or account issues
-- Decisions needed from partners/clients
-- Time-sensitive items with deadlines today
-- Complaints or escalations
-- Business-critical updates
-
-🟡 ACTION (not urgent, but needs a response):
-- Information needed from Emma (specs, decisions, confirmations)
-- Follow-ups on ongoing projects
-- Internal requests for input/approval
-- Scheduled meetings/calls that need confirmation
-
-🟢 FYI (low priority, informational only):
-- Newsletters, notifications, transactional emails
-- CC'd conversations Emma's not directly involved in
-- Status updates (no action needed)
-- Congratulations, board opportunities, general interest items
-
-RULES:
-1. Be strict about URGENT - only things that truly need Emma TODAY
-2. Be strict about ACTION - things that definitely need a response
-3. Everything else goes in FYI
-4. Financial/account issues = URGENT
-5. Project specs/confirmations = ACTION
-6. Newsletters/marketing = FYI
-
-Return ONLY a JSON object with this structure (NO OTHER TEXT):
-{
-  "categorized": [
-    {
-      "index": 1,
-      "category": "urgent|action|fyi",
-      "reason": "brief reason"
-    },
-    ...
-  ]
-}
-
-EMAILS TO CATEGORIZE:
-${emailList}`;
-
-  const response = await callClaudeAPI(apiKey, prompt);
-  
-  // Parse Claude's response
-  let categorized = [];
-  try {
-    categorized = JSON.parse(response).categorized || [];
-  } catch (e) {
-    console.error('Failed to parse Claude response:', response);
-    categorized = [];
-  }
-
-  // Build briefing structure
-  const urgent = [];
-  const action = [];
-  const fyi = [];
-
-  categorized.forEach(cat => {
-    const email = emails[cat.index - 1];
-    if (!email) return;
-
-    const emailObj = {
-      id: email.id,
-      subject: email.subject,
-      from: email.from,
-      replyTo: email.replyTo,
-      category: cat.category,
-      detail: email.detail,
-      action: cat.category === 'urgent' ? 'Respond today' : cat.category === 'action' ? 'Action needed' : 'Review',
-      receivedDateTime: email.receivedDateTime,
-      isRead: email.isRead,
+    const options = {
+      hostname: 'graph.microsoft.com',
+      path: url.replace('https://graph.microsoft.com', ''),
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
     };
 
-    if (cat.category === 'urgent') {
-      urgent.push(emailObj);
-    } else if (cat.category === 'action') {
-      action.push(emailObj);
-    } else {
-      fyi.push(emailObj);
-    }
-  });
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve(parsed);
+        } catch (e) {
+          reject(new Error('Failed to parse Graph response: ' + e.message));
+        }
+      });
+    });
 
-  return {
-    urgent,
-    action,
-    fyi,
-    meetings: [],
-    ignore: [],
-  };
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function fetchOutlookEmails() {
+  try {
+    const tenantId = process.env.MICROSOFT_TENANT_ID;
+    const clientId = process.env.MICROSOFT_CLIENT_ID;
+    const clientSecret = process.env.MICROSOFT_CLIENT_SECRET;
+
+    if (!tenantId || !clientId || !clientSecret) {
+      throw new Error('Missing Azure credentials in environment');
+    }
+
+    const token = await getAccessToken(tenantId, clientId, clientSecret);
+    const response = await makeGraphRequest(
+      'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=20&$orderby=receivedDateTime desc',
+      token
+    );
+
+    const emails = response.value || [];
+    
+    return emails.map(email => ({
+      id: email.id,
+      subject: email.subject || '(No subject)',
+      from: email.from?.emailAddress?.name || email.from?.emailAddress?.address || 'Unknown',
+      replyTo: email.replyTo?.[0]?.emailAddress?.address || email.from?.emailAddress?.address || '',
+      detail: (email.bodyPreview || '').substring(0, 300),
+      receivedDateTime: email.receivedDateTime,
+      isRead: email.isRead,
+    }));
+  } catch (error) {
+    console.error('Error fetching emails:', error);
+    return [];
+  }
 }
 
 function callClaudeAPI(apiKey, prompt) {
@@ -231,14 +151,14 @@ function callClaudeAPI(apiKey, prompt) {
 
     const req = https.request(options, (res) => {
       let data = '';
-      res.on('data', chunk => data += chunk);
+      res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
         try {
           const parsed = JSON.parse(data);
           const content = parsed.content?.[0]?.text || '';
           resolve(content);
         } catch (e) {
-          reject(new Error('Failed to parse Claude response'));
+          reject(new Error('Failed to parse Claude response: ' + e.message));
         }
       });
     });
@@ -247,4 +167,126 @@ function callClaudeAPI(apiKey, prompt) {
     req.write(body);
     req.end();
   });
+}
+
+async function categorizEmails(emails) {
+  try {
+    if (emails.length === 0) {
+      return {
+        urgent: [],
+        action: [],
+        fyi: [],
+        meetings: [],
+        ignore: [],
+      };
+    }
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      throw new Error('Missing Anthropic API key');
+    }
+
+    const emailList = emails
+      .map((e, i) => `Email ${i + 1}:\nFrom: ${e.from}\nSubject: ${e.subject}\nPreview: ${e.detail}`)
+      .join('\n\n');
+
+    const prompt = `Categorize these emails for Emma McSkelly (CEO, NCM).
+
+URGENT (needs Emma's response today):
+- Financial/account issues
+- Client/partner decisions needed
+- Time-sensitive deadlines
+- Complaints, escalations
+- Business critical updates
+
+ACTION (not urgent, but needs response):
+- Information/specs Emma needs to provide
+- Follow-ups on ongoing projects
+- Approvals/confirmations needed
+- Meeting confirmations
+
+FYI (informational, no action needed):
+- Newsletters, notifications
+- CC'd conversations
+- Status updates
+- Marketing, general interest
+
+Return ONLY this JSON (no other text):
+{
+  "categorized": [
+    {"index": 1, "category": "urgent|action|fyi", "reason": "brief reason"},
+    {"index": 2, "category": "urgent|action|fyi", "reason": "brief reason"}
+  ]
+}
+
+EMAILS:
+${emailList}`;
+
+    const response = await callClaudeAPI(apiKey, prompt);
+    
+    let categorized = [];
+    try {
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        categorized = JSON.parse(jsonMatch[0]).categorized || [];
+      }
+    } catch (e) {
+      console.error('Failed to parse categorization:', e);
+      categorized = [];
+    }
+
+    const urgent = [];
+    const action = [];
+    const fyi = [];
+
+    categorized.forEach(cat => {
+      const email = emails[cat.index - 1];
+      if (!email) return;
+
+      const emailObj = {
+        id: email.id,
+        subject: email.subject,
+        from: email.from,
+        replyTo: email.replyTo,
+        category: cat.category,
+        detail: email.detail,
+        action: 'Review',
+        receivedDateTime: email.receivedDateTime,
+        isRead: email.isRead,
+      };
+
+      if (cat.category === 'urgent') urgent.push(emailObj);
+      else if (cat.category === 'action') action.push(emailObj);
+      else fyi.push(emailObj);
+    });
+
+    // Emails that didn't get categorized go to FYI
+    const categorizedIds = new Set(categorized.map(c => emails[c.index - 1]?.id).filter(Boolean));
+    emails.forEach(email => {
+      if (!categorizedIds.has(email.id)) {
+        fyi.push({
+          id: email.id,
+          subject: email.subject,
+          from: email.from,
+          replyTo: email.replyTo,
+          category: 'fyi',
+          detail: email.detail,
+          action: 'Review',
+          receivedDateTime: email.receivedDateTime,
+          isRead: email.isRead,
+        });
+      }
+    });
+
+    return { urgent, action, fyi, meetings: [], ignore: [] };
+  } catch (error) {
+    console.error('Error categorizing emails:', error);
+    return {
+      urgent: [],
+      action: [],
+      fyi: [],
+      meetings: [],
+      ignore: [],
+    };
+  }
 }
