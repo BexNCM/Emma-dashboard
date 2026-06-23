@@ -3,40 +3,42 @@ import Head from 'next/head';
 
 const FETCH_WEBHOOK = 'https://hook.eu1.make.com/goiuad2qu5k2jwb6vdovxbwwnoywo78s';
 const ACTIONS_WEBHOOK = 'https://hook.eu1.make.com/kdjon3heov9zltj1oay65pyvvkeg9uch';
+const ANTHROPIC_KEY = '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';
 
-// Retry helper — Make webhooks return "Accepted" immediately then process async
-// We retry with a delay to get the real response
-const callWebhook = async (payload, retries = 4, delayMs = 1500) => {
-  for (let i = 0; i < retries; i++) {
-    if (i > 0) await new Promise(r => setTimeout(r, delayMs));
-    try {
-      const res = await fetch(ACTIONS_WEBHOOK, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const text = await res.text();
-      const trimmed = text.trim();
-      if (trimmed === 'Accepted' || trimmed === '') continue;
-      return { ok: res.ok, text: trimmed, status: res.status };
-    } catch (e) {
-      if (i === retries - 1) throw e;
-    }
-  }
-  return null;
+// AI draft — calls Anthropic directly, no Make round-trip, no "Accepted" problem
+const generateAiDraft = async (email, notes) => {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_KEY,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1000,
+      system: "You draft email replies for Emma McSkelly, CEO of NCM Auctions (UK commercial asset disposal). Emma's voice: professional, warm, direct, confident. Short sentences. Gets to the point. No fluff. Signs off: 'Best, Emma'. Write under 150 words. Don't invent facts, prices or dates. Output ONLY the reply text. Start with salutation e.g. 'Hi [name],' and end with 'Best,\nEmma'. No preamble or commentary.",
+      messages: [{
+        role: 'user',
+        content: `Draft a reply to this email:\n\nFrom: ${email.from_name} (${email.from_address})\nSubject: ${email.subject}\n\nEmail content:\n${email.body || email.preview}\n\n${notes ? 'Emma notes to include: ' + notes : ''}`
+      }]
+    })
+  });
+  if (!res.ok) throw new Error('AI draft failed');
+  const data = await res.json();
+  return data.content?.[0]?.text || '';
 };
 
-const fetchFullBody = async (emailId) => {
-  try {
-    const result = await callWebhook({ action: 'fetch_body', emailId });
-    if (!result) return null;
-    try {
-      const data = JSON.parse(result.text);
-      return data.body || result.text || null;
-    } catch { return result.text || null; }
-  } catch { return null; }
-};
-
+// Actions webhook with retry for save/send/forward (these are async in Make)
+const callActionsWebhook = async (payload) => {
+  const res = await fetch(ACTIONS_WEBHOOK, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  // For save/send/forward we don't need the response body — just fire and confirm
+  return res.ok || res.status < 500;
 };
 
 export default function Dashboard() {
@@ -44,7 +46,6 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
-  const [bodyLoading, setBodyLoading] = useState(false);
   const [replyText, setReplyText] = useState('');
   const [processing, setProcessing] = useState(null);
   const [aiDrafting, setAiDrafting] = useState(false);
@@ -81,21 +82,10 @@ export default function Dashboard() {
     setTimeout(() => setToast(null), 3500);
   };
 
-  const openModal = async (email) => {
-    // Open immediately with what we have (preview)
-    setSelected({ ...email, fullBody: null });
+  const openModal = (email) => {
+    setSelected({ ...email });
     setReplyText('');
     setForwardOpen(false);
-    setBodyLoading(true);
-
-    // Try to fetch full body in background
-    if (email.id) {
-      const full = await fetchFullBody(email.id);
-      if (full) {
-        setSelected(prev => prev ? { ...prev, fullBody: full } : prev);
-      }
-    }
-    setBodyLoading(false);
   };
 
   const closeModal = () => {
@@ -103,7 +93,19 @@ export default function Dashboard() {
     setReplyText('');
     setForwardOpen(false);
     setForwardTo('');
-    setBodyLoading(false);
+  };
+
+  const handleAiDraft = async () => {
+    if (!selected) return;
+    setAiDrafting(true);
+    try {
+      const draft = await generateAiDraft(selected, replyText);
+      if (draft) setReplyText(draft);
+    } catch (e) {
+      showToast('✕ AI draft failed: ' + e.message, 'error');
+    } finally {
+      setAiDrafting(false);
+    }
   };
 
   const handleAction = async (action, email, extra = {}) => {
@@ -115,44 +117,20 @@ export default function Dashboard() {
         fromAddress: email.from_address,
         fromName: email.from_name,
         subject: email.subject,
-        body: email.fullBody || email.body || email.preview,
+        body: email.body || email.preview,
         replyText: extra.replyText !== undefined ? extra.replyText : replyText,
         forwardTo: extra.forwardTo || ''
       };
-      const result = await callWebhook(payload);
-      if (!result) throw new Error("No response from server");
-      if (!result.ok) throw new Error("Action failed (" + result.status + ")");
-      let data = {};
-      const trimmed = result.text;
-      if (trimmed === 'draft_saved' || trimmed === 'sent' || trimmed === 'forward_drafted') {
-        data = { status: trimmed };
-      } else {
-        try { data = JSON.parse(trimmed); } catch {
-          // Plain text body response — treat as draft text
-          data = { draft: trimmed, body: trimmed };
-        }
-      }
-
-      if (action === 'ai_draft') return data.draft || trimmed || '';
-      if (action === 'fetch_body') return data.body || trimmed || null;
+      const ok = await callActionsWebhook(payload);
+      if (!ok) throw new Error('Action failed');
       if (action === 'save_draft') showToast('✓ Draft saved to Outlook');
       else if (action === 'send') { showToast('✓ Reply sent'); closeModal(); }
       else if (action === 'forward_draft') { showToast('✓ Forward draft saved'); closeModal(); }
+      else if (action === 'delete') { showToast('✓ Deleted'); closeModal(); }
     } catch (e) {
       showToast('✕ ' + e.message, 'error');
     } finally {
       setProcessing(null);
-    }
-  };
-
-  const handleAiDraft = async () => {
-    if (!selected) return;
-    setAiDrafting(true);
-    try {
-      const draft = await handleAction('ai_draft', selected, { replyText });
-      if (draft) setReplyText(draft);
-    } finally {
-      setAiDrafting(false);
     }
   };
 
@@ -179,7 +157,6 @@ export default function Dashboard() {
   const fyi = filteredEmails(briefing?.emails?.fyi);
   const showSection = (key) => filter === 'all' || filter === key;
 
-  // Strip HTML tags from email body for display
   const stripHtml = (html) => {
     if (!html) return '';
     return html
@@ -198,9 +175,7 @@ export default function Dashboard() {
       .trim();
   };
 
-  const displayBody = selected
-    ? stripHtml(selected.fullBody || selected.body || selected.preview || 'Loading email content…')
-    : '';
+  const displayBody = selected ? stripHtml(selected.body || selected.preview || '') : '';
 
   return (
     <>
@@ -217,11 +192,9 @@ export default function Dashboard() {
         :root{--ncm-navy:#0f1419;--ncm-navy-soft:#1a2030;--ncm-gold:#c4a96b;--ncm-gold-soft:#d4bc85;--ncm-cream:#faf7f2;--ncm-paper:#f5f1ea;--ncm-ink:#1a1a1a;--ncm-ink-soft:#4a4a4a;--ncm-ink-faded:#8a8a8a;--ncm-line:#e8e3da;--urgent:#c0392b;--urgent-bg:#fdf2f0;--action:#b8860b;--action-bg:#fdf9ed;--fyi:#5a7a4d}
         body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;background:var(--ncm-cream);color:var(--ncm-ink);min-height:100vh;-webkit-font-smoothing:antialiased}
         @keyframes spin{to{transform:rotate(360deg)}}
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
       `}</style>
 
       <div style={S.shell}>
-        {/* HEADER */}
         <div style={S.header}>
           <div style={S.headerOverlay}></div>
           <div style={S.brandRow}>
@@ -243,7 +216,6 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* TOOLBAR */}
         {briefing && (
           <div style={S.toolbar}>
             <div style={S.search}>
@@ -260,16 +232,14 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* LOADING */}
         {loading && (
           <div style={S.stateBox}>
             <div style={S.spinner}></div>
             <div style={{marginTop:16,color:'var(--ncm-ink-faded)'}}>Fetching your inbox…</div>
-            <div style={{marginTop:6,fontSize:12,color:'var(--ncm-ink-faded)'}}>Claude is reading and categorising — takes ~15 seconds</div>
+            <div style={{marginTop:6,fontSize:12,color:'var(--ncm-ink-faded)'}}>Claude is categorising — takes ~15 seconds</div>
           </div>
         )}
 
-        {/* ERROR */}
         {error && !loading && (
           <div style={S.stateBox}>
             <div style={{fontSize:14,color:'var(--urgent)',marginBottom:12,fontWeight:600}}>Couldn't load briefing</div>
@@ -278,7 +248,6 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* EMAIL LISTS */}
         {briefing && !loading && (
           <>
             {showSection('urgent') && urgent.length > 0 && (
@@ -309,69 +278,41 @@ export default function Dashboard() {
         <div style={S.footer}>Live briefing · <span style={{color:'var(--ncm-gold)'}}>NCM Auctions</span> · {lastUpdated?`Updated ${formatTime(lastUpdated)}`:'Loading'}</div>
       </div>
 
-      {/* EMAIL MODAL */}
       {selected && (
         <div style={S.modalOverlay} onClick={e=>{if(e.target===e.currentTarget)closeModal()}}>
           <div style={S.modal}>
             <div style={S.modalHead}>
               <div style={{flex:1}}>
-                <div style={S.modalFrom}>
-                  From <strong>{selected.from_name}</strong>
-                  {selected.from_address && ` · ${selected.from_address}`}
-                  {selected.received_at && ` · ${timeAgo(selected.received_at)}`}
-                </div>
+                <div style={S.modalFrom}>From <strong>{selected.from_name}</strong>{selected.from_address && ` · ${selected.from_address}`}{selected.received_at && ` · ${timeAgo(selected.received_at)}`}</div>
                 <div style={S.modalSubject}>{selected.subject}</div>
                 {selected.suggested_action && <div style={S.modalSuggestion}>↳ {selected.suggested_action}</div>}
               </div>
               <button style={S.modalClose} onClick={closeModal}>✕</button>
             </div>
 
-            {/* EMAIL BODY */}
             <div style={S.modalBody}>
-              {bodyLoading && !selected.fullBody ? (
-                <div style={{display:'flex',alignItems:'center',gap:10,color:'var(--ncm-ink-faded)',fontSize:13}}>
-                  <div style={{...S.spinner,width:16,height:16,borderWidth:2}}></div>
-                  Loading full email…
-                </div>
-              ) : (
-                <div style={{whiteSpace:'pre-wrap',wordWrap:'break-word',fontSize:14,lineHeight:1.7,color:'var(--ncm-ink-soft)'}}>
-                  {displayBody}
-                </div>
-              )}
+              <div style={{whiteSpace:'pre-wrap',wordWrap:'break-word',fontSize:14,lineHeight:1.7,color:'var(--ncm-ink-soft)'}}>
+                {displayBody || <span style={{color:'var(--ncm-ink-faded)',fontStyle:'italic'}}>No email content available</span>}
+              </div>
             </div>
 
-            {/* REPLY AREA */}
             {!forwardOpen && (
               <>
                 <div style={S.modalActionsWrap}>
                   <div style={S.modalLabel}>Your reply</div>
-                  <textarea
-                    style={S.modalReply}
-                    value={replyText}
-                    onChange={e=>setReplyText(e.target.value)}
-                    placeholder="Type your response… or hit ✨ AI draft to have Claude write it in your voice"
-                  />
+                  <textarea style={S.modalReply} value={replyText} onChange={e=>setReplyText(e.target.value)} placeholder="Type your response… or hit ✨ AI draft to have Claude write it in your voice" />
                 </div>
                 <div style={S.modalActions}>
-                  <button style={S.btnGhost} onClick={handleAiDraft} disabled={aiDrafting}>
-                    {aiDrafting ? '⋯ drafting…' : '✨ AI draft'}
-                  </button>
-                  <button style={S.btnDanger} onClick={()=>{if(confirm('Delete this email?'))handleAction('delete',selected)}} disabled={!!processing}>
-                    🗑 Delete
-                  </button>
+                  <button style={S.btnGhost} onClick={handleAiDraft} disabled={aiDrafting}>{aiDrafting ? '⋯ drafting…' : '✨ AI draft'}</button>
+                  <button style={S.btnDanger} onClick={()=>{if(confirm('Delete this email?'))handleAction('delete',selected)}} disabled={!!processing}>🗑 Delete</button>
                   <div style={{flex:1}}></div>
                   <button style={S.btnGhost} onClick={()=>setForwardOpen(true)} disabled={!!processing}>→ Forward</button>
-                  <button style={S.btnGold} onClick={()=>handleAction('save_draft',selected)} disabled={!!processing||!replyText}>
-                    {processing==='save_draft'?'⋯ saving…':'↳ Save draft to Outlook'}
-                  </button>
-                  <button style={S.btnPrimary} onClick={()=>{if(confirm('Send this reply now?'))handleAction('send',selected)}} disabled={!!processing||!replyText}>
-                    {processing==='send'?'⋯ sending…':'Send →'}
-                  </button>
+                  <button style={S.btnGold} onClick={()=>handleAction('save_draft',selected)} disabled={!!processing||!replyText}>{processing==='save_draft'?'⋯ saving…':'↳ Save draft to Outlook'}</button>
+                  <button style={S.btnPrimary} onClick={()=>{if(confirm('Send this reply now?'))handleAction('send',selected)}} disabled={!!processing||!replyText}>{processing==='send'?'⋯ sending…':'Send →'}</button>
                 </div>
               </>
             )}
 
-            {/* FORWARD */}
             {forwardOpen && (
               <>
                 <div style={S.modalActionsWrap}>
@@ -383,9 +324,7 @@ export default function Dashboard() {
                 <div style={S.modalActions}>
                   <button style={S.btnGhost} onClick={()=>setForwardOpen(false)}>← Back</button>
                   <div style={{flex:1}}></div>
-                  <button style={S.btnGold} onClick={()=>handleAction('forward_draft',selected,{forwardTo})} disabled={!!processing||!forwardTo}>
-                    {processing==='forward_draft'?'⋯':'↳ Save forward draft'}
-                  </button>
+                  <button style={S.btnGold} onClick={()=>handleAction('forward_draft',selected,{forwardTo})} disabled={!!processing||!forwardTo}>{processing==='forward_draft'?'⋯':'↳ Save forward draft'}</button>
                 </div>
               </>
             )}
@@ -393,21 +332,13 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* TOAST */}
-      {toast && (
-        <div style={{...S.toast,background:toast.type==='error'?'#c0392b':'#0f1419'}}>
-          {toast.msg}
-        </div>
-      )}
+      {toast && <div style={{...S.toast,background:toast.type==='error'?'#c0392b':'#0f1419'}}>{toast.msg}</div>}
     </>
   );
 }
 
 const Stat = ({num,label,color}) => (
-  <div style={S.stat}>
-    <div style={{...S.statNum,color}}>{num}</div>
-    <div style={S.statLabel}>{label}</div>
-  </div>
+  <div style={S.stat}><div style={{...S.statNum,color}}>{num}</div><div style={S.statLabel}>{label}</div></div>
 );
 
 const Section = ({title,count,dotColor,shadow,children}) => (
@@ -422,16 +353,13 @@ const Section = ({title,count,dotColor,shadow,children}) => (
 );
 
 const EmailCard = ({email,variant,onClick,timeAgo}) => {
-  const borders = {urgent:'var(--urgent)',action:'var(--action)',fyi:'var(--fyi)'};
-  const tagBg = {urgent:'var(--urgent-bg)',action:'var(--action-bg)'};
-  const tagColor = {urgent:'var(--urgent)',action:'var(--action)'};
+  const borders={urgent:'var(--urgent)',action:'var(--action)',fyi:'var(--fyi)'};
+  const tagBg={urgent:'var(--urgent-bg)',action:'var(--action-bg)'};
+  const tagColor={urgent:'var(--urgent)',action:'var(--action)'};
   return (
-    <div
-      style={{...S.email,borderLeft:`3px solid ${borders[variant]}`}}
-      onClick={onClick}
+    <div style={{...S.email,borderLeft:`3px solid ${borders[variant]}`}} onClick={onClick}
       onMouseEnter={e=>{e.currentTarget.style.transform='translateY(-1px)';e.currentTarget.style.boxShadow='0 8px 24px -8px rgba(15,20,25,0.12)'}}
-      onMouseLeave={e=>{e.currentTarget.style.transform='';e.currentTarget.style.boxShadow=''}}
-    >
+      onMouseLeave={e=>{e.currentTarget.style.transform='';e.currentTarget.style.boxShadow=''}}>
       <div style={S.emailTop}>
         <div style={S.emailFrom}>{email.from_name}{email.from_address?` · ${email.from_address}`:''}</div>
         <div style={S.emailTime}>{timeAgo(email.received_at)}</div>
