@@ -3,7 +3,7 @@ import Head from 'next/head';
 
 const FETCH_WEBHOOK = 'https://hook.eu1.make.com/goiuad2qu5k2jwb6vdovxbwwnoywo78s';
 const ACTIONS_WEBHOOK = 'https://hook.eu1.make.com/kdjon3heov9zltj1oay65pyvvkeg9uch';
-const ANTHROPIC_KEY = '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';
+const ANTHROPIC_KEY = process.env.NEXT_PUBLIC_ANTHROPIC_KEY || '';
 
 // AI draft — calls Anthropic directly, no Make round-trip, no "Accepted" problem
 const generateAiDraft = async (email, notes) => {
