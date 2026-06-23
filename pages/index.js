@@ -44,7 +44,7 @@ const callActionsWebhook = async (payload) => {
 // Fetch full email body via Netlify serverless function (server-side Azure credentials)
 const fetchEmailBody = async (emailId) => {
   try {
-    const res = await fetch(`/api/get-email?id=${encodeURIComponent(emailId)}`);
+    const res = await fetch(`/.netlify/functions/get-email?id=${encodeURIComponent(emailId)}`);
     if (!res.ok) return null;
     const data = await res.json();
     return data.body || null;
