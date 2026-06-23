@@ -4,24 +4,39 @@ import Head from 'next/head';
 const FETCH_WEBHOOK = 'https://hook.eu1.make.com/goiuad2qu5k2jwb6vdovxbwwnoywo78s';
 const ACTIONS_WEBHOOK = 'https://hook.eu1.make.com/kdjon3heov9zltj1oay65pyvvkeg9uch';
 
-// Fetch full email body via a second Make webhook call passing the email ID
-// The actions webhook handles action=fetch_body and returns the full body
+// Retry helper — Make webhooks return "Accepted" immediately then process async
+// We retry with a delay to get the real response
+const callWebhook = async (payload, retries = 4, delayMs = 1500) => {
+  for (let i = 0; i < retries; i++) {
+    if (i > 0) await new Promise(r => setTimeout(r, delayMs));
+    try {
+      const res = await fetch(ACTIONS_WEBHOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const text = await res.text();
+      const trimmed = text.trim();
+      if (trimmed === 'Accepted' || trimmed === '') continue;
+      return { ok: res.ok, text: trimmed, status: res.status };
+    } catch (e) {
+      if (i === retries - 1) throw e;
+    }
+  }
+  return null;
+};
+
 const fetchFullBody = async (emailId) => {
   try {
-    const res = await fetch(ACTIONS_WEBHOOK, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'fetch_body', emailId })
-    });
-    if (!res.ok) return null;
-    const text = await res.text();
-    if (!text || text.trim() === 'Accepted') return null;
-    // Plain text response — return directly
+    const result = await callWebhook({ action: 'fetch_body', emailId });
+    if (!result) return null;
     try {
-      const data = JSON.parse(text);
-      return data.body || text || null;
-    } catch { return text || null; }
+      const data = JSON.parse(result.text);
+      return data.body || result.text || null;
+    } catch { return result.text || null; }
   } catch { return null; }
+};
+
 };
 
 export default function Dashboard() {
@@ -104,16 +119,11 @@ export default function Dashboard() {
         replyText: extra.replyText !== undefined ? extra.replyText : replyText,
         forwardTo: extra.forwardTo || ''
       };
-      const res = await fetch(ACTIONS_WEBHOOK, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      if (!res.ok) throw new Error('Action failed (' + res.status + ')');
-      const text = await res.text();
-      // Webhook responds with plain text — handle both plain text and JSON
+      const result = await callWebhook(payload);
+      if (!result) throw new Error("No response from server");
+      if (!result.ok) throw new Error("Action failed (" + result.status + ")");
       let data = {};
-      const trimmed = text.trim();
+      const trimmed = result.text;
       if (trimmed === 'draft_saved' || trimmed === 'sent' || trimmed === 'forward_drafted') {
         data = { status: trimmed };
       } else {
