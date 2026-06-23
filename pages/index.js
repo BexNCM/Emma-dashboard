@@ -15,11 +15,12 @@ const fetchFullBody = async (emailId) => {
     });
     if (!res.ok) return null;
     const text = await res.text();
-    // If scenario B isn't handling fetch_body yet, fall back gracefully
+    if (!text || text.trim() === 'Accepted') return null;
+    // Plain text response — return directly
     try {
       const data = JSON.parse(text);
-      return data.body || null;
-    } catch { return null; }
+      return data.body || text || null;
+    } catch { return text || null; }
   } catch { return null; }
 };
 
@@ -110,10 +111,20 @@ export default function Dashboard() {
       });
       if (!res.ok) throw new Error('Action failed (' + res.status + ')');
       const text = await res.text();
+      // Webhook responds with plain text — handle both plain text and JSON
       let data = {};
-      try { data = JSON.parse(text); } catch { throw new Error('Invalid response from server'); }
+      const trimmed = text.trim();
+      if (trimmed === 'draft_saved' || trimmed === 'sent' || trimmed === 'forward_drafted') {
+        data = { status: trimmed };
+      } else {
+        try { data = JSON.parse(trimmed); } catch {
+          // Plain text body response — treat as draft text
+          data = { draft: trimmed, body: trimmed };
+        }
+      }
 
-      if (action === 'ai_draft') return data.draft || '';
+      if (action === 'ai_draft') return data.draft || trimmed || '';
+      if (action === 'fetch_body') return data.body || trimmed || null;
       if (action === 'save_draft') showToast('✓ Draft saved to Outlook');
       else if (action === 'send') { showToast('✓ Reply sent'); closeModal(); }
       else if (action === 'forward_draft') { showToast('✓ Forward draft saved'); closeModal(); }
