@@ -41,11 +41,22 @@ const callActionsWebhook = async (payload) => {
   return res.ok || res.status < 500;
 };
 
+// Fetch full email body via Netlify serverless function (server-side Azure credentials)
+const fetchEmailBody = async (emailId) => {
+  try {
+    const res = await fetch(`/api/get-email?id=${encodeURIComponent(emailId)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.body || null;
+  } catch { return null; }
+};
+
 export default function Dashboard() {
   const [briefing, setBriefing] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
+  const [bodyLoading, setBodyLoading] = useState(false);
   const [replyText, setReplyText] = useState('');
   const [processing, setProcessing] = useState(null);
   const [aiDrafting, setAiDrafting] = useState(false);
@@ -82,10 +93,16 @@ export default function Dashboard() {
     setTimeout(() => setToast(null), 3500);
   };
 
-  const openModal = (email) => {
-    setSelected({ ...email });
+  const openModal = async (email) => {
+    setSelected({ ...email, fullBody: null });
     setReplyText('');
     setForwardOpen(false);
+    if (email.id) {
+      setBodyLoading(true);
+      const full = await fetchEmailBody(email.id);
+      if (full) setSelected(prev => prev ? { ...prev, fullBody: full } : prev);
+      setBodyLoading(false);
+    }
   };
 
   const closeModal = () => {
@@ -93,6 +110,7 @@ export default function Dashboard() {
     setReplyText('');
     setForwardOpen(false);
     setForwardTo('');
+    setBodyLoading(false);
   };
 
   const handleAiDraft = async () => {
@@ -175,7 +193,7 @@ export default function Dashboard() {
       .trim();
   };
 
-  const displayBody = selected ? stripHtml(selected.body || selected.preview || '') : '';
+  const displayBody = selected ? stripHtml(selected.fullBody || selected.body || selected.preview || '') : '';
 
   return (
     <>
@@ -291,9 +309,16 @@ export default function Dashboard() {
             </div>
 
             <div style={S.modalBody}>
-              <div style={{whiteSpace:'pre-wrap',wordWrap:'break-word',fontSize:14,lineHeight:1.7,color:'var(--ncm-ink-soft)'}}>
-                {displayBody || <span style={{color:'var(--ncm-ink-faded)',fontStyle:'italic'}}>No email content available</span>}
-              </div>
+              {bodyLoading ? (
+                <div style={{display:'flex',alignItems:'center',gap:10,color:'var(--ncm-ink-faded)',fontSize:13}}>
+                  <div style={{width:16,height:16,border:'2px solid #e8e3da',borderTop:'2px solid #c4a96b',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}></div>
+                  Loading full email…
+                </div>
+              ) : (
+                <div style={{whiteSpace:'pre-wrap',wordWrap:'break-word',fontSize:14,lineHeight:1.7,color:'var(--ncm-ink-soft)'}}>
+                  {displayBody || <span style={{color:'var(--ncm-ink-faded)',fontStyle:'italic'}}>No email content available</span>}
+                </div>
+              )}
             </div>
 
             {!forwardOpen && (
