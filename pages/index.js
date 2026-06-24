@@ -44,7 +44,7 @@ const callActionsWebhook = async (payload) => {
 // Fetch full email body via Netlify serverless function (server-side Azure credentials)
 const fetchEmailBody = async (emailId) => {
   try {
-    const res = await fetch(`/.netlify/functions/get-email?id=${encodeURIComponent(emailId)}`);
+    const res = await fetch(`/api/get-email?id=${encodeURIComponent(emailId)}`);
     if (!res.ok) return null;
     const data = await res.json();
     return data.body || null;
@@ -144,7 +144,7 @@ export default function Dashboard() {
       if (action === 'save_draft') showToast('✓ Draft saved to Outlook');
       else if (action === 'send') { showToast('✓ Reply sent'); closeModal(); }
       else if (action === 'forward_draft') { showToast('✓ Forward draft saved'); closeModal(); }
-      else if (action === 'delete') { showToast('✓ Deleted'); closeModal(); }
+      else if (action === 'delete') { showToast('✓ Deleted'); setBriefing(prev => { if (!prev) return prev; const filterOut = (arr) => arr.filter(e => e.id !== email.id); return { ...prev, emails: { urgent: filterOut(prev.emails?.urgent || []), action: filterOut(prev.emails?.action || []), fyi: filterOut(prev.emails?.fyi || []), ignore: [] } }; }); closeModal(); }
     } catch (e) {
       showToast('✕ ' + e.message, 'error');
     } finally {
@@ -153,14 +153,21 @@ export default function Dashboard() {
   };
 
   const formatDate = () => new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const greeting = () => {
+    const h = new Date().getHours();
+    if (h < 12) return 'Good morning';
+    if (h < 17) return 'Good afternoon';
+    return 'Good evening';
+  };
   const formatTime = (d) => d ? d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
   const timeAgo = (iso) => {
     if (!iso) return '';
-    const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+    const d = new Date(iso);
+    const diff = (Date.now() - d.getTime()) / 1000;
     if (diff < 60) return 'just now';
     if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
-    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
-    return Math.floor(diff / 86400) + 'd ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago · ' + d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit'});
+    return d.toLocaleDateString('en-GB', {day:'numeric',month:'short'}) + ' · ' + d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit'});
   };
 
   const filteredEmails = (list) => {
@@ -222,7 +229,7 @@ export default function Dashboard() {
             </div>
             <button style={S.iconBtn} onClick={fetchBriefing} disabled={loading} title="Refresh">{loading ? '⋯' : '↻'}</button>
           </div>
-          <div style={S.greeting}>Good morning, <span style={{ color: 'var(--ncm-gold)' }}>Emma</span></div>
+          <div style={S.greeting}>{greeting()}, <span style={{ color: 'var(--ncm-gold)' }}>Emma</span></div>
           <div style={S.date}>{formatDate()}{lastUpdated && ` · Updated ${formatTime(lastUpdated)}`}</div>
           {briefing?.counts && (
             <div style={S.stats}>
