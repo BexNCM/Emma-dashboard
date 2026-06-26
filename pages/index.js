@@ -1,18 +1,27 @@
-const https = require('https');
+import https from 'https';
+import { URLSearchParams } from 'url';
 
-function httpsRequest(url, options = {}, body = null) {
+function request(url, options = {}, body = null) {
   return new Promise((resolve, reject) => {
-    const urlObj = new URL(url);
-    const reqOptions = {
-      hostname: urlObj.hostname,
-      path: urlObj.pathname + urlObj.search,
+    const u = new URL(url);
+    const opts = {
+      hostname: u.hostname,
+      port: 443,
+      path: u.pathname + u.search,
       method: options.method || 'GET',
       headers: options.headers || {}
     };
-    const req = https.request(reqOptions, (res) => {
+    const req = https.request(opts, (res) => {
       let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve({ status: res.statusCode, text: () => data, json: () => JSON.parse(data), ok: res.statusCode < 300 }));
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode,
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          json: () => JSON.parse(data),
+          text: () => data
+        });
+      });
     });
     req.on('error', reject);
     if (body) req.write(body);
@@ -32,8 +41,11 @@ export default async function handler(req, res) {
   const clientSecret = process.env.MICROSOFT_CLIENT_SECRET;
   const userEmail = 'emma@ncmassetmanagement.co.uk';
 
+  if (!tenantId || !clientId || !clientSecret) {
+    return res.status(500).json({ error: 'Missing env vars', tenantId: !!tenantId, clientId: !!clientId, clientSecret: !!clientSecret });
+  }
+
   try {
-    // Get access token
     const tokenBody = new URLSearchParams({
       grant_type: 'client_credentials',
       client_id: clientId,
@@ -41,7 +53,7 @@ export default async function handler(req, res) {
       scope: 'https://graph.microsoft.com/.default'
     }).toString();
 
-    const tokenRes = await httpsRequest(
+    const tokenRes = await request(
       `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
       { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(tokenBody) } },
       tokenBody
@@ -50,13 +62,12 @@ export default async function handler(req, res) {
     if (!tokenRes.ok) return res.status(500).json({ error: 'Token failed', detail: tokenRes.text() });
     const { access_token } = tokenRes.json();
 
-    // Fetch email
-    const emailRes = await httpsRequest(
+    const emailRes = await request(
       `https://graph.microsoft.com/v1.0/users/${userEmail}/messages/${encodeURIComponent(emailId)}?$select=body,bodyPreview,subject`,
       { headers: { Authorization: `Bearer ${access_token}` } }
     );
 
-    if (!emailRes.ok) return res.status(emailRes.status).json({ error: 'Graph API failed', detail: emailRes.text() });
+    if (!emailRes.ok) return res.status(emailRes.status).json({ error: 'Graph failed', detail: emailRes.text() });
     const email = emailRes.json();
 
     const html = email.body?.content || email.bodyPreview || '';
@@ -72,6 +83,6 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ body: text, subject: email.subject });
   } catch (e) {
-    return res.status(500).json({ error: e.message, stack: e.stack });
+    return res.status(500).json({ error: e.message, stack: e.stack?.substring(0, 500) });
   }
 }
